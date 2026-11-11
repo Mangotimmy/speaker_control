@@ -1,0 +1,8 @@
+# Runtime dependencies for Linux (installed into a private virtualenv by
+# scripts/install_linux.sh).
+#
+# Distribution packages are an alternative if pip wheels are unavailable:
+#   Debian/Ubuntu : python3-pyqt6 python3-hid python3-pip
+#   Fedora        : python3-pyqt6 python3-hidapi
+PyQt6>=6.6
+hidapi>=0.14

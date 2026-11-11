@@ -7,7 +7,13 @@ Interface: MI_04, Col02 (UsagePage: 0xFF14)
 
 import time
 import threading
-import hid
+
+try:  # hidapi provides the same ``hid`` module on Windows, Linux and macOS.
+    import hid
+except ImportError as exc:  # pragma: no cover - dependency missing
+    raise ImportError(
+        "The 'hid' module is required (pip install hidapi / python3-hid): %s" % exc
+    ) from exc
 
 VID = 0x2D99
 PID = 0xA121
@@ -117,6 +123,81 @@ RGB_MODES = [
 RGB_MODE_MAP = {m["index"]: m for m in RGB_MODES}
 SOUND_MODE_MAP = {m["index"]: m for m in SOUND_MODES}
 
+
+def _path_text(device: dict) -> str:
+    path = device.get("path", "")
+    if isinstance(path, (bytes, bytearray)):
+        return bytes(path).decode("utf-8", "replace")
+    return str(path)
+
+
+def select_control_interface(devices):
+    """
+    Picks the vendor HID collection that speaks the R20 control protocol.
+
+    * Windows exposes the collection as ``...&Col02`` and reports
+      ``usage_page == 0xFF14``.
+    * Linux hidraw paths look like ``/dev/hidraw3``; there we rely on the
+      reported usage page / interface number instead of the path text.
+    """
+    if not devices:
+        return None
+
+    def first(predicate):
+        for dev in devices:
+            try:
+                if predicate(dev):
+                    return dev.get("path")
+            except (KeyError, TypeError):
+                continue
+        return None
+
+    # 1. Exact vendor usage page used by the control collection.
+    path = first(lambda d: d.get("usage_page") == 0xFF14)
+    if path:
+        return path
+    # 2. Windows column name for the same collection.
+    path = first(lambda d: "Col02" in _path_text(d))
+    if path:
+        return path
+    # 3. Linux: MI_04 -> interface number 4, then MI_02.
+    for interface in (4, 2):
+        path = first(lambda d, i=interface: d.get("interface_number") == i)
+        if path:
+            return path
+    # 4. Legacy fallback: any collection that is not the MI_03 audio endpoint.
+    path = first(lambda d: "MI_03" not in _path_text(d))
+    if path:
+        return path
+    return devices[0].get("path")
+
+
+def enumerate_devices():
+    """Returns the raw hidapi device dictionaries for the Edifier R20."""
+    try:
+        return list(hid.enumerate(VID, PID))
+    except Exception as exc:  # hidapi raises OSError on permission problems
+        print("HID enumeration failed: %s" % exc)
+        return []
+
+
+def describe_devices():
+    """Human readable one-liner per interface, used by ``--diagnose``."""
+    lines = []
+    for dev in enumerate_devices():
+        lines.append(
+            "path=%s iface=%s usage_page=0x%04X product=%r manufacturer=%r"
+            % (
+                _path_text(dev),
+                dev.get("interface_number"),
+                dev.get("usage_page") or 0,
+                dev.get("product_string"),
+                dev.get("manufacturer_string"),
+            )
+        )
+    return lines
+
+
 def build_packet(cmd, payload=None):
     if payload is None:
         payload = []
@@ -172,19 +253,8 @@ class EdifierR20:
                 self._dev = None
                 self.is_connected = False
 
-            devices = hid.enumerate(VID, PID)
-            target_path = None
-            for d in devices:
-                # Target the vendor interface Col02 (UsagePage: 0xFF14)
-                if b'Col02' in d['path'] or (d.get('usage_page') == 0xFF14):
-                    target_path = d['path']
-                    break
-
-            if not target_path and devices:
-                for d in devices:
-                    if b'MI_03' not in d['path']:
-                        target_path = d['path']
-                        break
+            devices = enumerate_devices()
+            target_path = select_control_interface(devices)
 
             if not target_path:
                 self.is_connected = False
@@ -548,6 +618,44 @@ class EdifierR20:
         self.light_groups[mode]["G"] = max(0, min(255, int(g)))
         self.light_groups[mode]["B"] = max(0, min(255, int(b)))
         return self.set_light_mode(mode)
+
+    def set_light_color_fast(self, r, g, b, mode_index=None):
+        """
+        Lightweight RGB update intended for real-time animation (e.g. the
+        sound-reactive rainbow). Sends the light-set command without firing
+        listener notifications, so high-frequency updates stay cheap.
+
+        Returns True on success.
+        """
+        if mode_index is None:
+            mode_index = self.current_light_mode if self.current_light_mode != 7 else self.last_active_light_mode
+        mode_index = max(1, min(7, int(mode_index)))
+        spec = RGB_MODE_MAP.get(mode_index)
+        if not spec or not spec.get("rgb_settable"):
+            return False
+
+        grp = dict(self.light_groups.get(mode_index, spec["default_group"]))
+        grp["R"] = max(0, min(255, int(r)))
+        grp["G"] = max(0, min(255, int(g)))
+        grp["B"] = max(0, min(255, int(b)))
+        grp = self._sanitize_light_group(mode_index, grp)
+        self.light_groups[mode_index] = grp
+
+        payload = [
+            LIGHT_ARRAY_INDEX,
+            mode_index,
+            grp["R"],
+            grp["G"],
+            grp["B"],
+            grp["brightness"],
+            grp["speed"],
+        ]
+        res = self._send_command(CMD_LIGHT_SET, payload, timeout_ms=80)
+        if res:
+            if self.current_light_mode == 7:
+                self.current_light_mode = mode_index
+            self.last_active_light_mode = mode_index
+        return bool(res)
 
     def set_light_sub_effect(self, sub_effect: int):
         """Sets sub-effect (1 or 2) for Modes 1 and 3."""

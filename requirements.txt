@@ -1,0 +1,7 @@
+# Runtime dependencies for the Edifier R20 tray controller.
+# The application runs on Windows and Linux; platform specific packages are
+# selected with environment markers.
+PyQt6>=6.6
+hidapi>=0.14
+pycaw>=20240210; sys_platform == "win32"
+comtypes>=1.2; sys_platform == "win32"

@@ -2,11 +2,16 @@
     "sync_windows_volume": false,
     "keep_windows_volume_100": true,
     "autostart": true,
-    "last_volume": 6,
-    "pre_sync_volume": 6,
+    "last_volume": 7,
+    "pre_sync_volume": 7,
     "pre_sync_windows_volume": 1.0,
-    "last_sound_mode": 1,
+    "last_sound_mode": 3,
     "last_rgb_mode": 2,
-    "last_brightness": 255,
-    "last_speed": 255
+    "last_brightness": 100,
+    "last_speed": 10,
+    "sound_reactive_rainbow": true,
+    "popup_x": 1060,
+    "popup_y": 174,
+    "popup_pinned": false,
+    "config_schema": 2
 }

@@ -1,17 +1,108 @@
 """
-Modern Floating Quick Settings Popup for Edifier R20.
-Windows 11 Fluent Dark Aesthetic with volume sliders, presets, RGB matrix, and sync switches.
+Modern floating control panel for the Edifier R20.
+
+* Windows 11 Fluent dark aesthetic.
+* The panel is **movable**: drag it anywhere by its header / background, and its
+  position is remembered between sessions.
+* A close ("✕") button and a pin ("📌") button are part of the header; Esc also
+  closes the panel.  When pinned the panel stays open while it is not focused.
+* The **current RGB colour** is shown on the mode buttons (colour dot), on the
+  active colour swatch (white ring) and in a live colour chip in the header.
 """
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
     QPushButton, QCheckBox, QFrame, QGridLayout,
-    QGraphicsDropShadowEffect, QApplication, QColorDialog, QProgressBar
+    QGraphicsDropShadowEffect, QColorDialog, QProgressBar
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QEvent, QTimer
-from PyQt6.QtGui import QColor, QFont, QCursor, QGuiApplication
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QEvent, QTimer, QSize, QRect, QRectF
+from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPixmap, QPainter, QPen
 
 from r20_controller import RGB_MODES, RGB_MODE_MAP, SOUND_MODES, EdifierR20
+import platform_utils
+
+FONT_STACK = '"Segoe UI", "Microsoft JhengHei UI", "Noto Sans CJK TC", "Noto Sans", "DejaVu Sans", sans-serif'
+
+#: Representative colour per lighting mode, used when a mode has no settable RGB.
+MODE_ACCENT_RGB = {
+    1: (0, 200, 255),
+    2: (11, 255, 146),
+    3: (255, 220, 60),
+    4: (255, 123, 0),
+    5: (59, 0, 195),
+    6: (46, 204, 64),
+    7: (70, 70, 80),
+}
+
+_DOT_ICON_CACHE = {}
+
+
+def make_dot_icon(rgb, size=12) -> QIcon:
+    """Renders (and caches) a small filled circular colour dot icon."""
+    rgb = tuple(int(max(0, min(255, round(float(c))))) for c in tuple(rgb)[:3])
+    key = (rgb, size)
+    cached = _DOT_ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
+    dpr = 2
+    pix = QPixmap(size * dpr, size * dpr)
+    pix.fill(Qt.GlobalColor.transparent)
+    pix.setDevicePixelRatio(dpr)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor(255, 255, 255, 170), 1.0))
+    painter.setBrush(QColor(*rgb))
+    painter.drawEllipse(QRectF(1.0, 1.0, size - 2.0, size - 2.0))
+    painter.end()
+    icon = QIcon(pix)
+    if len(_DOT_ICON_CACHE) > 256:
+        _DOT_ICON_CACHE.clear()
+    _DOT_ICON_CACHE[key] = icon
+    return icon
+
+
+class ColorChip(QWidget):
+    """Small circular swatch that displays the live RGB light colour."""
+
+    def __init__(self, parent=None, diameter: int = 14):
+        super().__init__(parent)
+        self._diameter = diameter
+        self._color = QColor(11, 255, 146)
+        self._animated = False
+        self.setFixedSize(diameter + 8, diameter + 8)
+        self.setToolTip("目前 RGB 燈效顏色")
+
+    def set_color(self, rgb, animated: bool = False, tooltip: str | None = None):
+        try:
+            r, g, b = (int(max(0, min(255, round(float(c))))) for c in tuple(rgb)[:3])
+        except (TypeError, ValueError):
+            return
+        color = QColor(r, g, b)
+        if tooltip is not None:
+            self.setToolTip(tooltip)
+        if color == self._color and bool(animated) == self._animated:
+            return
+        self._color = color
+        self._animated = bool(animated)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        d = float(self._diameter)
+        x = (self.width() - d) / 2.0
+        y = (self.height() - d) / 2.0
+        if self._animated:
+            glow = QColor(self._color)
+            glow.setAlpha(95)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(glow)
+            painter.drawEllipse(QRectF(x - 2.5, y - 2.5, d + 5.0, d + 5.0))
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 1.4))
+        painter.setBrush(self._color)
+        painter.drawEllipse(QRectF(x, y, d, d))
+        painter.end()
+
 
 STYLE_SHEET = """
 QWidget#Container {
@@ -22,7 +113,7 @@ QWidget#Container {
 
 QLabel {
     color: #e6e6ec;
-    font-family: "Segoe UI", "Microsoft JhengHei UI", sans-serif;
+    font-family: %(font)s;
 }
 
 QLabel#HeaderTitle {
@@ -69,6 +160,33 @@ QLabel#VolumeStep {
     margin-bottom: 4px;
 }
 
+QLabel#LiveColor {
+    font-size: 11px;
+    color: #9ca3af;
+}
+
+/* Window chrome buttons (pin / close) */
+QPushButton#CloseBtn, QPushButton#PinBtn {
+    background-color: transparent;
+    color: #9ca3af;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    padding: 0px;
+}
+QPushButton#CloseBtn:hover {
+    background-color: #ef4444;
+    color: #ffffff;
+}
+QPushButton#PinBtn:hover {
+    background-color: #374151;
+    color: #e5e7eb;
+}
+QPushButton#PinBtn:checked {
+    background-color: #1e3a8a;
+    color: #93c5fd;
+}
+
 /* Custom Volume Slider */
 QSlider::groove:horizontal {
     border: none;
@@ -94,7 +212,6 @@ QSlider::handle:horizontal {
 QSlider::handle:horizontal:hover {
     background: #e0e7ff;
     border-color: #2563eb;
-    transform: scale(1.1);
 }
 
 /* Preset Buttons */
@@ -198,6 +315,7 @@ QCheckBox {
     color: #d1d5db;
     font-size: 12px;
     spacing: 8px;
+    font-family: %(font)s;
 }
 
 QCheckBox::indicator {
@@ -220,7 +338,7 @@ QFrame.Separator {
     height: 1px;
     border: none;
 }
-"""
+""" % {"font": FONT_STACK}
 
 COLOR_PRESETS = [
     ("#0bff92", (11, 255, 146), "極光青"),
@@ -233,6 +351,7 @@ COLOR_PRESETS = [
     ("#ffffff", (255, 255, 255), "純淨白"),
 ]
 
+
 class R20Popup(QWidget):
     volume_requested = pyqtSignal(int)
     sound_mode_requested = pyqtSignal(int)
@@ -244,6 +363,7 @@ class R20Popup(QWidget):
     sync_toggled = pyqtSignal(bool)
     keep_win_100_toggled = pyqtSignal(bool)
     autostart_toggled = pyqtSignal(bool)
+    sound_reactive_toggled = pyqtSignal(bool)
     reconnect_requested = pyqtSignal()
 
     def __init__(self, r20_controller: EdifierR20, config_mgr):
@@ -252,6 +372,8 @@ class R20Popup(QWidget):
         self.config = config_mgr
         self._updating_ui = False
         self._color_dialog_open = False
+        self._dragging = False
+        self._drag_offset = QPoint()
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -260,10 +382,12 @@ class R20Popup(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet(STYLE_SHEET)
+        self.setWindowTitle("Edifier R20")
 
         self._build_ui()
         self.installEventFilter(self)
 
+    # ------------------------------------------------------------------ UI
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(10, 10, 10, 10)
@@ -271,7 +395,7 @@ class R20Popup(QWidget):
         # Container Frame for shadow and rounded corners
         self.container = QFrame(self)
         self.container.setObjectName("Container")
-        
+
         # Shadow effect
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(24)
@@ -283,15 +407,26 @@ class R20Popup(QWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(18, 14, 18, 14)
 
-        # 1. Header (Device Title + Status)
+        # 1. Header (drag handle + title + live colour + status + pin + close)
         header_layout = QHBoxLayout()
+        header_layout.setSpacing(6)
+
+        self.drag_handle = QLabel("⠿", self)
+        self.drag_handle.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.drag_handle.setStyleSheet("color: #6b7280; font-size: 13px;")
+        self.drag_handle.setToolTip("按住標題列或面板空白處拖曳即可移動面板")
+
         title_label = QLabel("Edifier R20", self)
         title_label.setObjectName("HeaderTitle")
-        
+        title_label.setCursor(Qt.CursorShape.SizeAllCursor)
+        title_label.setToolTip("按住拖曳可移動面板")
+
+        self.color_chip = ColorChip(self, 14)
+
         self.status_badge = QLabel("● 已連線", self)
         self.status_badge.setObjectName("StatusBadgeConnected")
-        
-        self.btn_reconnect = QPushButton("重新連線", self)
+
+        self.btn_reconnect = QPushButton("重連", self)
         self.btn_reconnect.setStyleSheet("""
             QPushButton {
                 background: #2a2a36; color: #a1a1aa; border: 1px solid #3f3f50;
@@ -302,10 +437,33 @@ class R20Popup(QWidget):
         self.btn_reconnect.clicked.connect(self.reconnect_requested.emit)
         self.btn_reconnect.setVisible(False)
 
+        self.btn_pin = QPushButton("📌", self)
+        self.btn_pin.setObjectName("PinBtn")
+        self.btn_pin.setCheckable(True)
+        self.btn_pin.setFixedSize(24, 24)
+        self.btn_pin.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_pin.setChecked(bool(self.config.get("popup_pinned", False)))
+        self.btn_pin.setToolTip(
+            "已釘選：點擊面板以外時不會關閉" if self.btn_pin.isChecked()
+            else "釘選面板：點擊面板以外時不自動關閉"
+        )
+        self.btn_pin.toggled.connect(self._on_pin_toggled)
+
+        self.btn_close = QPushButton("✕", self)
+        self.btn_close.setObjectName("CloseBtn")
+        self.btn_close.setFixedSize(24, 24)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setToolTip("關閉面板 (Esc)")
+        self.btn_close.clicked.connect(self.hide)
+
+        header_layout.addWidget(self.drag_handle)
         header_layout.addWidget(title_label)
+        header_layout.addWidget(self.color_chip)
         header_layout.addStretch()
         header_layout.addWidget(self.btn_reconnect)
         header_layout.addWidget(self.status_badge)
+        header_layout.addWidget(self.btn_pin)
+        header_layout.addWidget(self.btn_close)
         layout.addLayout(header_layout)
 
         # Separator
@@ -323,7 +481,7 @@ class R20Popup(QWidget):
         vol_display_layout = QHBoxLayout()
         self.lbl_volume_percent = QLabel("50%", self)
         self.lbl_volume_percent.setObjectName("VolumePercent")
-        
+
         self.lbl_volume_step = QLabel("(8 / 16)", self)
         self.lbl_volume_step.setObjectName("VolumeStep")
 
@@ -401,7 +559,7 @@ class R20Popup(QWidget):
         sec_rgb.setObjectName("SectionHeader")
         layout.addWidget(sec_rgb)
 
-        # Grid of 7 RGB modes
+        # Grid of 7 RGB modes (each button carries the mode's current colour dot)
         self.rgb_buttons = {}
         rgb_grid = QGridLayout()
         rgb_grid.setSpacing(6)
@@ -412,6 +570,7 @@ class R20Popup(QWidget):
             btn = QPushButton(f"{m['icon']} {m['name']}", self)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("class", "RgbBtn")
+            btn.setIconSize(QSize(12, 12))
             btn.clicked.connect(lambda checked, mode=idx: self._on_rgb_mode_clicked(mode))
             self.rgb_buttons[idx] = btn
 
@@ -425,6 +584,22 @@ class R20Popup(QWidget):
                     col = 0
                     row += 1
         layout.addLayout(rgb_grid)
+
+        # Live current colour readout (requirement: show the current RGB colour)
+        self.lbl_live_color = QLabel("", self)
+        self.lbl_live_color.setObjectName("LiveColor")
+        self.lbl_live_color.setTextFormat(Qt.TextFormat.RichText)
+        self.lbl_live_color.setWordWrap(True)
+        self.lbl_live_color.setToolTip("顯示喇叭目前實際使用的 RGB 燈效顏色")
+        layout.addWidget(self.lbl_live_color)
+
+        # Sound-reactive rainbow option (rgb_settable modes, e.g. 海妖之聲)
+        self.chk_rainbow = QCheckBox("🌈 彩虹律動 (海妖之聲 RGB 跟隨聲音大小變色)", self)
+        self.chk_rainbow.setToolTip("開啟後「海妖之聲」等可調色燈效會隨音樂音量即時變化彩虹顏色")
+        self.chk_rainbow.setChecked(self.config.get("sound_reactive_rainbow", False))
+        self.chk_rainbow.toggled.connect(self._on_rainbow_toggled)
+        self.chk_rainbow.setVisible(False)
+        layout.addWidget(self.chk_rainbow)
 
         # Color Swatches Row (shown for rgb_settable modes 2, 4, 5, 6)
         self.color_row_widget = QWidget(self)
@@ -441,29 +616,20 @@ class R20Popup(QWidget):
             sw.setFixedSize(20, 20)
             sw.setToolTip(tip)
             sw.setCursor(Qt.CursorShape.PointingHandCursor)
-            sw.setStyleSheet(
-                f"QPushButton {{ background-color: {hex_code}; border: 1.5px solid #4b5563; border-radius: 10px; }}"
-                f"QPushButton:hover {{ border: 2px solid #ffffff; }}"
-            )
+            sw.setStyleSheet(self._swatch_style(hex_code, False))
             sw.clicked.connect(lambda checked, c=rgb_tuple: self._on_swatch_clicked(c))
-            self.swatch_buttons.append((sw, rgb_tuple, hex_code))
+            self.swatch_buttons.append((sw, rgb_tuple, hex_code, tip))
             color_layout.addWidget(sw)
 
         self.btn_custom_color = QPushButton("自訂", self.color_row_widget)
         self.btn_custom_color.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_custom_color.setStyleSheet("""
-            QPushButton {
-                background: #2a2a36; color: #d1d5db; border: 1px solid #3f3f50;
-                border-radius: 6px; padding: 2px 7px; font-size: 11px;
-            }
-            QPushButton:hover { background: #3b82f6; color: #ffffff; }
-        """)
+        self.btn_custom_color.setStyleSheet(self._custom_style(False))
         self.btn_custom_color.clicked.connect(self._on_custom_color_clicked)
         color_layout.addStretch()
         color_layout.addWidget(self.btn_custom_color)
         layout.addWidget(self.color_row_widget)
 
-        # Sub-effect Row (shown for multi-color modes 1 & 3 which have sub-effect 1 & 2)
+        # Sub-effect Row (shown for multi-colour modes 1 & 3)
         self.sub_effect_widget = QWidget(self)
         sub_layout = QHBoxLayout(self.sub_effect_widget)
         sub_layout.setContentsMargins(0, 2, 0, 0)
@@ -480,7 +646,7 @@ class R20Popup(QWidget):
             sub_layout.addWidget(b_sub)
         layout.addWidget(self.sub_effect_widget)
 
-        # Brightness Slider (1..10 -> 10..100, active on Modes 1 & 4)
+        # Brightness Slider (10..100, active on Modes 1 & 4)
         self.brightness_widget = QWidget(self)
         brightness_layout = QHBoxLayout(self.brightness_widget)
         brightness_layout.setContentsMargins(0, 0, 0, 0)
@@ -520,17 +686,24 @@ class R20Popup(QWidget):
         options_layout = QVBoxLayout()
         options_layout.setSpacing(6)
 
-        self.chk_sync = QCheckBox("與 Windows 系統音量自動同步", self)
+        self.chk_sync = QCheckBox(
+            "與 %s 自動同步" % platform_utils.system_volume_label(), self
+        )
         self.chk_sync.setChecked(self.config.get("sync_windows_volume", True))
         self.chk_sync.toggled.connect(self._on_sync_toggled)
 
-        self.chk_keep_win_100 = QCheckBox("同步時保持 Windows 混音 100% (拉桿僅控喇叭硬體)", self)
+        self.chk_keep_win_100 = QCheckBox(
+            "同步時保持 %s 100%% (拉桿僅控喇叭硬體)" % platform_utils.mixer_label(), self
+        )
         self.chk_keep_win_100.setChecked(self.config.get("keep_windows_volume_100", True))
         self.chk_keep_win_100.setEnabled(self.chk_sync.isChecked())
         self.chk_keep_win_100.toggled.connect(self._on_keep_win_100_toggled)
 
         self.chk_autostart = QCheckBox("開機自動啟動", self)
         self.chk_autostart.setChecked(self.config.is_autostart_enabled())
+        self.chk_autostart.setEnabled(platform_utils.autostart_supported())
+        if not platform_utils.autostart_supported():
+            self.chk_autostart.setToolTip("此平台不支援自動啟動設定")
         self.chk_autostart.toggled.connect(self._on_autostart_toggled)
 
         options_layout.addWidget(self.chk_sync)
@@ -540,24 +713,52 @@ class R20Popup(QWidget):
 
         root_layout.addWidget(self.container)
         self.setFixedWidth(372)
+        self._refresh_rgb_button_icons()
 
+    # -------------------------------------------------------------- styles
+    @staticmethod
+    def _swatch_style(hex_code: str, active: bool) -> str:
+        border = "3px solid #ffffff" if active else "1.5px solid #4b5563"
+        return (
+            "QPushButton { background-color: %s; border: %s; border-radius: 10px; }"
+            "QPushButton:hover { border: 2px solid #ffffff; }" % (hex_code, border)
+        )
+
+    @staticmethod
+    def _custom_style(active: bool) -> str:
+        if active:
+            return (
+                "QPushButton { background: #1e3a8a; color: #bfdbfe; "
+                "border: 2px solid #60a5fa; border-radius: 6px; padding: 2px 7px; font-size: 11px; }"
+                "QPushButton:hover { background: #2563eb; color: #ffffff; }"
+            )
+        return (
+            "QPushButton { background: #2a2a36; color: #d1d5db; border: 1px solid #3f3f50;"
+            "border-radius: 6px; padding: 2px 7px; font-size: 11px; }"
+            "QPushButton:hover { background: #3b82f6; color: #ffffff; }"
+        )
+
+    # --------------------------------------------------------- state update
     def update_state(
         self,
         vol: int = None,
         mode: int = None,
         is_connected: bool = None,
         sound_mode: int = None,
+        sound_reactive: bool = None,
     ):
         self._updating_ui = True
         try:
             if is_connected is not None:
                 if is_connected:
                     self.status_badge.setText("● 已連線")
+                    self.status_badge.setToolTip("Edifier R20 已連線")
                     self.status_badge.setObjectName("StatusBadgeConnected")
                     self.status_badge.setStyleSheet("")  # re-apply QSS
                     self.btn_reconnect.setVisible(False)
                 else:
-                    self.status_badge.setText("● 未偵測到喇叭")
+                    self.status_badge.setText("● 未連線")
+                    self.status_badge.setToolTip("未偵測到 Edifier R20 喇叭")
                     self.status_badge.setObjectName("StatusBadgeDisconnected")
                     self.status_badge.setStyleSheet("")
                     self.btn_reconnect.setVisible(True)
@@ -597,8 +798,22 @@ class R20Popup(QWidget):
                 spec = RGB_MODE_MAP.get(mode, RGB_MODE_MAP[2])
                 grp = self.r20.get_active_light_group(mode)
 
+                # Sound-reactive rainbow option is only meaningful for
+                # RGB-settable modes (2 海妖之聲, 4, 5, 6)
+                rgb_settable = bool(spec.get("rgb_settable"))
+                self.chk_rainbow.setVisible(rgb_settable)
+                active_rainbow = (
+                    self.config.get("sound_reactive_rainbow", False)
+                    if sound_reactive is None else bool(sound_reactive)
+                )
+                if not rgb_settable:
+                    active_rainbow = False
+                self.chk_rainbow.blockSignals(True)
+                self.chk_rainbow.setChecked(active_rainbow)
+                self.chk_rainbow.blockSignals(False)
+
                 # Show/hide color picker row vs sub-effect row
-                self.color_row_widget.setVisible(bool(spec.get("rgb_settable")))
+                self.color_row_widget.setVisible(rgb_settable)
                 self.sub_effect_widget.setVisible(bool(spec.get("effect_types")))
 
                 if spec.get("effect_types"):
@@ -624,10 +839,186 @@ class R20Popup(QWidget):
                     self.speed_slider.setValue(s_step)
                     self.lbl_speed.setText(f"⚡ 速度 ({s_step}):")
 
+                self._update_color_indicators(mode, spec, grp, rgb_settable, active_rainbow)
                 self.adjustSize()
         finally:
             self._updating_ui = False
 
+    # ------------------------------------------------------ colour display
+    def _update_color_indicators(self, mode, spec, grp, rgb_settable, animated):
+        """Shows the current RGB colour on the chip, the buttons and the label."""
+        if rgb_settable:
+            stored = (
+                int(grp.get("R", 0)), int(grp.get("G", 0)), int(grp.get("B", 0))
+            )
+            if stored == (0, 0, 0):
+                fallback = spec.get("default_group", MODE_ACCENT_RGB.get(mode, (11, 255, 146)))
+                display = (
+                    int(fallback.get("R", 11)),
+                    int(fallback.get("G", 255)),
+                    int(fallback.get("B", 146)),
+                )
+            else:
+                display = stored
+            hex_code = "#%02X%02X%02X" % display
+            suffix = " · 🌈 律動中" if animated else ""
+            self.color_chip.set_color(
+                display,
+                animated=animated,
+                tooltip="目前 RGB 顏色 %s · RGB(%d, %d, %d)%s"
+                % (hex_code, display[0], display[1], display[2], suffix),
+            )
+            prefix = "🌈 律動中" if animated else "目前顏色"
+            self.lbl_live_color.setText(
+                "<span style='color:%s; font-size:14px'>●</span>"
+                " %s <span style='color:#e5e7eb'>%s</span>"
+                " · RGB(%d, %d, %d)" % (hex_code, prefix, hex_code, *display)
+            )
+            self._refresh_swatches(display)
+        elif spec.get("is_switch"):
+            self.color_chip.set_color((70, 70, 80), animated=False, tooltip="RGB 燈效已關閉")
+            self.lbl_live_color.setText(
+                "<span style='color:#4b5563; font-size:14px'>●</span> 燈效已關閉"
+            )
+            self._refresh_swatches(None)
+        else:
+            accent = MODE_ACCENT_RGB.get(mode, (140, 140, 160))
+            hex_code = "#%02X%02X%02X" % accent
+            self.color_chip.set_color(
+                accent, animated=False,
+                tooltip="此燈效由喇叭內建效果產生，無法指定單一 RGB 顏色",
+            )
+            self.lbl_live_color.setText(
+                "<span style='color:%s; font-size:14px'>●</span>"
+                " 內建效果配色 · 此燈效無法自訂顏色" % hex_code
+            )
+            self._refresh_swatches(None)
+        self._refresh_rgb_button_icons()
+
+    def _refresh_rgb_button_icons(self):
+        """Puts a colour dot for each lighting mode onto its button."""
+        for idx, btn in self.rgb_buttons.items():
+            spec = RGB_MODE_MAP.get(idx)
+            if spec is None:
+                continue
+            if spec.get("rgb_settable"):
+                grp = self.r20.light_groups.get(idx, spec.get("default_group", {}))
+                rgb = (
+                    int(grp.get("R", 11)),
+                    int(grp.get("G", 255)),
+                    int(grp.get("B", 146)),
+                )
+                if rgb == (0, 0, 0):
+                    fallback = spec.get("default_group", {})
+                    rgb = (
+                        int(fallback.get("R", 11)),
+                        int(fallback.get("G", 255)),
+                        int(fallback.get("B", 146)),
+                    )
+                btn.setIcon(make_dot_icon(rgb))
+                btn.setToolTip("%s · 目前顏色 RGB(%d, %d, %d)" % (spec["name"], *rgb))
+            elif spec.get("is_switch"):
+                btn.setIcon(make_dot_icon((70, 70, 80)))
+                btn.setToolTip("關閉 RGB 燈效")
+            else:
+                btn.setIcon(QIcon())
+                btn.setToolTip("%s · 內建效果（固定配色）" % spec["name"])
+
+    def _refresh_swatches(self, active_rgb):
+        """Highlights the swatch that matches the live colour."""
+        active = None
+        if active_rgb is not None:
+            active = tuple(int(c) for c in tuple(active_rgb)[:3])
+        matched_preset = False
+        for sw, rgb_tuple, hex_code, tip in self.swatch_buttons:
+            is_active = active is not None and active == tuple(rgb_tuple)
+            matched_preset = matched_preset or is_active
+            sw.setStyleSheet(self._swatch_style(hex_code, is_active))
+            sw.setToolTip(("%s（目前顏色）" % tip) if is_active else tip)
+        self.btn_custom_color.setStyleSheet(
+            self._custom_style(active is not None and not matched_preset)
+        )
+
+    # ------------------------------------------------------------ live colour
+    def set_live_color(self, r: int, g: int, b: int, animated: bool = True):
+        """Called by the rainbow engine for each animated colour step."""
+        try:
+            r, g, b = int(r), int(g), int(b)
+        except (TypeError, ValueError):
+            return
+        hex_code = "#%02X%02X%02X" % (r, g, b)
+        suffix = " · 🌈 律動中" if animated else ""
+        self.color_chip.set_color(
+            (r, g, b), animated=animated,
+            tooltip="目前 RGB 顏色 %s · RGB(%d, %d, %d)%s" % (hex_code, r, g, b, suffix),
+        )
+        prefix = "🌈 律動中" if animated else "目前顏色"
+        self.lbl_live_color.setText(
+            "<span style='color:%s; font-size:14px'>●</span>"
+            " %s <span style='color:#e5e7eb'>%s</span>"
+            " · RGB(%d, %d, %d)" % (hex_code, prefix, hex_code, r, g, b)
+        )
+
+    # ------------------------------------------------------------- dragging
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and (event.buttons() & Qt.MouseButton.LeftButton):
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self._save_position()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _clamp_position(self, pos: QPoint) -> QPoint:
+        """Keeps the panel reachable on the currently attached screens."""
+        screens = QGuiApplication.screens()
+        if not screens:
+            return pos
+        rect = QRect(pos, self.size())
+        for screen in screens:
+            if screen.availableGeometry().intersects(rect):
+                return pos
+        primary = QGuiApplication.primaryScreen().availableGeometry()
+        x = max(primary.left(), min(pos.x(), primary.right() - self.width()))
+        y = max(primary.top(), min(pos.y(), primary.bottom() - self.height()))
+        return QPoint(x, y)
+
+    def _restored_position(self):
+        saved = self.config.popup_position()
+        if saved is None:
+            return None
+        pos = QPoint(saved[0], saved[1])
+        probe = QRect(pos, QSize(max(160, min(self.width(), 240)), 40))
+        for screen in QGuiApplication.screens():
+            if screen.availableGeometry().intersects(probe):
+                return self._clamp_position(pos)
+        # Saved position is on a monitor that is no longer attached.
+        return None
+
+    def _save_position(self):
+        pos = self._clamp_position(self.pos())
+        if pos != self.pos():
+            self.move(pos)
+        try:
+            self.config.save_popup_position(self.x(), self.y())
+        except Exception as exc:
+            print("Could not save popup position: %s" % exc)
+
+    # ------------------------------------------------------------- handlers
     def _set_volume(self, val: int):
         self.volume_requested.emit(val)
 
@@ -692,11 +1083,25 @@ class R20Popup(QWidget):
             self.config.set("keep_windows_volume_100", checked)
             self.keep_win_100_toggled.emit(checked)
 
+    def _on_rainbow_toggled(self, checked: bool):
+        if not self._updating_ui:
+            self.config.set("sound_reactive_rainbow", checked)
+            self.sound_reactive_toggled.emit(checked)
+
     def _on_autostart_toggled(self, checked: bool):
         if not self._updating_ui:
             self.config.set_autostart(checked)
             self.autostart_toggled.emit(checked)
 
+    def _on_pin_toggled(self, checked: bool):
+        self.btn_pin.setToolTip(
+            "已釘選：點擊面板以外時不會關閉" if checked
+            else "釘選面板：點擊面板以外時不自動關閉"
+        )
+        if not self._updating_ui:
+            self.config.set("popup_pinned", bool(checked))
+
+    # ----------------------------------------------------------- behaviours
     def wheelEvent(self, event):
         """Allows mouse wheel anywhere on the popup to change volume."""
         delta = event.angleDelta().y()
@@ -709,8 +1114,26 @@ class R20Popup(QWidget):
         self.volume_requested.emit(new_vol)
         event.accept()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def reset_position(self):
+        """Forgets the dragged position and returns next to the tray."""
+        try:
+            self.config.clear_popup_position()
+        except Exception:
+            pass
+        screen = QGuiApplication.primaryScreen().availableGeometry()
+        x = screen.right() - self.width() - 16
+        y = max(screen.top() + 8, screen.bottom() - self.height() - 16)
+        self.move(x, y)
+
     def show_near_tray(self):
-        """Positions the popup neatly above the system tray area."""
+        """Shows the panel at its remembered position (or above the tray)."""
         self.update_state(
             vol=self.r20.current_volume,
             mode=self.r20.current_light_mode,
@@ -718,18 +1141,27 @@ class R20Popup(QWidget):
             sound_mode=self.r20.current_sound_mode,
         )
         self.adjustSize()
-        screen = QGuiApplication.primaryScreen().availableGeometry()
-        x = screen.right() - self.width() - 16
-        y = max(screen.top() + 8, screen.bottom() - self.height() - 16)
-        self.move(x, y)
+        pos = self._restored_position()
+        if pos is None:
+            screen = QGuiApplication.primaryScreen().availableGeometry()
+            x = screen.right() - self.width() - 16
+            y = max(screen.top() + 8, screen.bottom() - self.height() - 16)
+            pos = QPoint(x, y)
+        self.move(self._clamp_position(pos))
         self.show()
         self.raise_()
         self.activateWindow()
 
     def changeEvent(self, event):
-        # Automatically close when clicking outside / losing active focus
+        # Automatically close when clicking outside / losing active focus,
+        # unless the panel is pinned, being dragged or a colour dialog is open.
         if event.type() == QEvent.Type.ActivationChange:
-            if not self.isActiveWindow() and not self._color_dialog_open:
+            if (
+                not self.isActiveWindow()
+                and not self._color_dialog_open
+                and not self._dragging
+                and not self.btn_pin.isChecked()
+            ):
                 self.hide()
         super().changeEvent(event)
 
@@ -772,7 +1204,7 @@ class R20VolumeOSD(QWidget):
                 border-radius: 14px;
             }
             QLabel {
-                font-family: "Segoe UI", "Microsoft JhengHei UI", sans-serif;
+                font-family: %s;
             }
             QProgressBar {
                 border: none;
@@ -785,7 +1217,7 @@ class R20VolumeOSD(QWidget):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #38bdf8);
                 border-radius: 5px;
             }
-        """)
+        """ % FONT_STACK)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(20)
@@ -838,7 +1270,7 @@ class R20VolumeOSD(QWidget):
 
         self.adjustSize()
         screen = QGuiApplication.primaryScreen().availableGeometry()
-        # Position at bottom-center, right above the native Windows 11 volume OSD pill
+        # Position at bottom-center, right above the native volume OSD pill
         x = screen.left() + (screen.width() - self.width()) // 2
         y = screen.bottom() - self.height() - 96
         self.move(x, y)
